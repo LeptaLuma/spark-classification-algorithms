@@ -144,7 +144,7 @@ def knn_df(spark, train_data, test_data, k, num_partitions=2):
         .select("id_test", F.col("label").alias("predicted_class"))
     )
     
-    return predictions
+    return predictions.collect()
 
 
 
