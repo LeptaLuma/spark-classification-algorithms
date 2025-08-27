@@ -22,8 +22,8 @@ def calculate_likelihoods(parameter_counts, class_counts):
         parts = key.split('-')
         attr_idx, attr_value, class_label = parts[1], parts[2], parts[3]
         
-        # Add Laplace smoothing (+1)
-        likelihood = (count + 1) / (class_counts[class_label] + len(set(parts[2] for parts in [k.split('-') for k in parameter_counts.keys()])))
+        # Add +1 to handle zero frequency classes
+        likelihood = (count + 1) / (class_counts[class_label] + 1)
         
         attr_key = f"attr-{attr_idx}-{attr_value}"
         likelihoods[class_label][attr_key] = likelihood
@@ -43,8 +43,8 @@ def classify_instance(features, priors, likelihoods, class_counts):
             if attr_key in likelihoods[class_label]:
                 log_score += math.log(likelihoods[class_label][attr_key])
             else:
-                # Laplace smoothing for unseen attribute values
-                log_score += math.log(1 / (class_counts[class_label] + 2))
+                # Handle unseen data
+                log_score += math.log(1 / (class_counts[class_label] + 1))
         
         class_scores[class_label] = log_score
     
@@ -75,7 +75,7 @@ def naive_bayes_rdd(sc, train_data, test_data):
                        .reduceByKey(lambda a, b: a + b)
                        .collectAsMap())
     
-    # Phase 3: Calculate probabilities 
+    # Phase 3: Calculate probabilities - NOT DISTRIBUTED
     priors = calculate_priors(class_counts, total_count)
     likelihoods = calculate_likelihoods(parameter_counts, class_counts)
     
@@ -116,7 +116,7 @@ def naive_bayes_df(spark, train_data, test_data):
                       .agg(F.count("*").alias("class_count"))
                       .withColumn("prior", F.col("class_count") / total_count))
     
-    # Phase 2: Explode features and create attribute-value-class combinations
+    # Phase 2: Explode features and create attribute-value-class combinations  
     exploded_df = (train_df
                   .select("class_label", F.posexplode("features").alias("attr_idx", "attr_value"))
                   .withColumn("attr_key", F.concat_ws("-", F.lit("attr"), F.col("attr_idx"), F.col("attr_value"))))
@@ -130,12 +130,13 @@ def naive_bayes_df(spark, train_data, test_data):
     likelihood_df = (likelihood_counts
                     .join(class_counts_df, "class_label")
                     .withColumn("likelihood", 
-                               (F.col("attr_count") + 1) / (F.col("class_count") + 2)))  # Laplace smoothing
+                               (F.col("attr_count") + 1) / (F.col("class_count") + 1)))  # Fixed smoothing to match RDD
     
-    # Collect probabilities for broadcasting
+    # Collect probabilities - following RDD approach of collecting to driver
     class_priors = {row['class_label']: row['prior'] for row in class_counts_df.collect()}
-    likelihood_map = {}
+    class_counts_map = {row['class_label']: row['class_count'] for row in class_counts_df.collect()}
     
+    likelihood_map = {}
     for row in likelihood_df.collect():
         class_label = row['class_label']
         attr_key = row['attr_key']
@@ -148,24 +149,28 @@ def naive_bayes_df(spark, train_data, test_data):
     # Broadcast the model parameters
     broadcast_priors = spark.sparkContext.broadcast(class_priors)
     broadcast_likelihoods = spark.sparkContext.broadcast(likelihood_map)
+    broadcast_class_counts = spark.sparkContext.broadcast(class_counts_map)
     
-    # Phase 4: Classification UDF
+    # Phase 4: Classification UDF - now matches RDD implementation exactly
     def classify_udf(features):
         priors = broadcast_priors.value
         likelihoods = broadcast_likelihoods.value
+        class_counts = broadcast_class_counts.value
         
         class_scores = {}
         
         for class_label in priors:
+            # Start with log prior (matches RDD)
             log_score = math.log(priors[class_label])
             
+            # Add log likelihoods (matches RDD)
             for attr_idx, attr_value in enumerate(features):
                 attr_key = f"attr-{attr_idx}-{attr_value}"
                 if class_label in likelihoods and attr_key in likelihoods[class_label]:
                     log_score += math.log(likelihoods[class_label][attr_key])
                 else:
-                    # Default probability for unseen attributes
-                    log_score += math.log(0.001)
+                    # Handle unseen data exactly like RDD implementation
+                    log_score += math.log(1 / (class_counts[class_label] + 1))
             
             class_scores[class_label] = log_score
         
