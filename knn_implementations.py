@@ -1,4 +1,3 @@
-from pyspark import SparkContext
 import heapq, math
 from collections import Counter
 from pyspark.sql import functions as F
@@ -56,7 +55,6 @@ def majority_voting(neighbors):
     classes = [label for label, _ in neighbors]
     return Counter(classes).most_common(1)[0][0]
 
-
 def knn_rdd(sc, train_data, test_data, k, num_partitions=2):
     """
     RDD-based kNN following the paper's algorithm more closely
@@ -66,7 +64,6 @@ def knn_rdd(sc, train_data, test_data, k, num_partitions=2):
     training_rdd = sc.parallelize(train_data, num_partitions)
     
     # Map phase: process each test point against each training partition
-
     mapped_rdd = training_rdd.mapPartitions(
         lambda partition: map_function(partition, test_data, k)
     )
@@ -78,74 +75,59 @@ def knn_rdd(sc, train_data, test_data, k, num_partitions=2):
     
     # Cleanup phase: majority voting
     predictions = reduced_rdd.mapValues(majority_voting)
-    
     return predictions.collect()
-
 
 def knn_df(spark, train_data, test_data, k, num_partitions=2):
     """
-    Optimized version using more Spark SQL native operations
+    DataFrame implementation following the same 3-phase structure as RDD version
     """
-    train_df = spark.createDataFrame(train_data, ["id_train", "features", "label"])
-    test_df = spark.createDataFrame(test_data, ["id_test", "features"])
+    # Create DataFrames with distinct column names
+    train_df = spark.createDataFrame(train_data, ["id_train", "train_features", "label"])
+    test_df = spark.createDataFrame(test_data, ["id_test", "test_features"])
     
-    # Repartition to simulate paper's distributed approach
-    train_df = train_df.repartition(num_partitions)
+    # Repartition training data
+    train_df = train_df.repartition(num_partitions).withColumn("partition_id", F.spark_partition_id())
     
-    # Rename columns to avoid ambiguity before cross join
-    test_df_renamed = test_df.select(
-        F.col("id_test"),
-        F.col("features").alias("test_features")
-    )
+    # PHASE 1: MAP - Get k-NN per partition (like map_function)
+    cross_joined = test_df.crossJoin(train_df)
     
-    train_df_renamed = train_df.select(
-        F.col("id_train"),
-        F.col("features").alias("train_features"),
-        F.col("label")
-    ).withColumn("partition_id", F.spark_partition_id())
-    
-    # PHASE 1: MAP - Compute distances and get k-NN per partition
-    cross_joined = test_df_renamed.crossJoin(train_df_renamed)
-    
-    # Vectorized distance calculation using array operations
-    distances_df = cross_joined.withColumn(
+    # Calculate distances
+    with_distances = cross_joined.withColumn(
         "distance",
-        F.sqrt(
-            F.aggregate(
-                F.arrays_zip("test_features", "train_features"),
-                F.lit(0.0),
-                lambda acc, x: acc + F.pow(x.getField("test_features") - x.getField("train_features"), 2)
-            )
-        )
+        F.sqrt(F.aggregate(
+            F.arrays_zip("test_features", "train_features"),
+            F.lit(0.0),
+            lambda acc, x: acc + F.pow(x.getField("test_features") - x.getField("train_features"), 2)
+        ))
     )
     
-    # Get k-NN per partition (MAP output)
+    # Get k nearest per partition (MAP output - CDj sets)
     partition_window = Window.partitionBy("id_test", "partition_id").orderBy("distance")
-    map_candidates = distances_df.withColumn(
-        "partition_rank", 
+    map_output = with_distances.withColumn(
+        "rank_in_partition", 
         F.row_number().over(partition_window)
-    ).filter(F.col("partition_rank") <= k)
+    ).filter(F.col("rank_in_partition") <= k).select("id_test", "label", "distance")
     
-    # PHASE 2: REDUCE - Merge and select global k-NN
+    # PHASE 2: REDUCE - Merge all CDj sets and keep k best (like reduce_operation)
     global_window = Window.partitionBy("id_test").orderBy("distance")
-    global_knn = map_candidates.withColumn(
+    reduce_output = map_output.withColumn(
         "global_rank",
         F.row_number().over(global_window)
     ).filter(F.col("global_rank") <= k)
     
-    # PHASE 3: CLEANUP - Majority voting
+    # PHASE 3: CLEANUP - Majority voting (like majority_voting)
     vote_window = Window.partitionBy("id_test").orderBy(F.desc("vote_count"))
     predictions = (
-        global_knn
+        reduce_output
         .groupBy("id_test", "label")
-        .agg(F.count("*").alias("vote_count"))
-        .withColumn("vote_rank", F.row_number().over(vote_window))
-        .filter(F.col("vote_rank") == 1)
+        .count()
+        .withColumnRenamed("count", "vote_count")
+        .withColumn("rank", F.row_number().over(vote_window))
+        .filter(F.col("rank") == 1)
         .select("id_test", F.col("label").alias("predicted_class"))
     )
     
     return predictions.collect()
-
 
 
 if __name__ == "__main__":
@@ -166,7 +148,3 @@ if __name__ == "__main__":
     print("\nPaper-based DataFrame implementation:")
     result_df = knn_df(spark, train, test, k=2, num_partitions=2)
     result_df.show()
-    
-    # print("\nOptimized DataFrame implementation:")
-    # result_df_opt = knn_df_paper_optimized(spark, train, test, k=2, num_partitions=2)
-    # result_df_opt.show()
