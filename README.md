@@ -1,12 +1,6 @@
 # Spark Classification Algorithms (k-NN and Naive Bayes)
 
-This repository contains research-oriented implementations of two classification algorithms adapted for distributed processing with Apache Spark: a MapReduce-style k-Nearest Neighbors (k-NN) and a Naive Bayes classifier. Both algorithms are implemented in two flavors: a low-level RDD-based version that follows the MapReduce steps, and a Spark DataFrame-based version using higher-level Spark SQL operations.
-
-Key goals:
-
-- Reproduce MapReduce-style algorithms from academic papers.
-- Provide comparable RDD and DataFrame implementations to benchmark performance and memory use.
-- Keep implementations readable and easy to experiment with small- to medium-sized datasets.
+This repository contains research-oriented implementations of two classification algorithms adapted for distributed processing with Apache Spark: a MapReduce-style k-Nearest Neighbors (k-NN) and a Naive Bayes classifier. Both algorithms are implemented in two flavors: a low-level RDD-based version that follows the MapReduce steps, and a Spark DataFrame-based version using higher-level Spark SQL operations. These implementations are based on 2 papers that are in the repository
 
 Contents
 
@@ -60,15 +54,3 @@ Implementation notes
 Data source
 
 - UCI Nursery dataset: https://archive.ics.uci.edu/ml/machine-learning-databases/nursery/nursery.data
-
-Caveats and suggestions
-
-- The current code collects some structures to the driver for simplicity and reproducibility with the MapReduce approach. For very large datasets you should adapt the model-building steps to remain distributed (avoid collecting large maps to driver).
-- For reproducible benchmarking, fix Spark configuration and ensure the machine has enough memory for the configured Spark driver/executor values.
-- Results may differ slightly between RDD and DataFrame versions due to implementation differences; the repository aims to minimize those differences where possible.
-
-License
-This repository is provided for research and educational purposes. Add a LICENSE file or modify this section to suit your preferred license.
-
-Contact
-For questions or suggestions, open an issue or refer to the code comments in the implementation files.
